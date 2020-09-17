@@ -9,7 +9,9 @@ import (
 	"github.com/btcsuite/btcd/btcec"
 	btccfg "github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	bstxscript "github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	bsutil "github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/jessevdk/go-flags"
 	mbwire "github.com/martinboehm/btcd/wire"
@@ -26,6 +28,7 @@ import (
 var (
 	sign      Sign
 	broadcast Broadcast
+	signAndBroadcast SignAndBroadcast
 
 	MainNetParams chaincfg.Params
 
@@ -69,6 +72,14 @@ func main() {
 		"build and broadcast the transaction",
 		"Collect the signatures, build the transaction and broadcast.",
 		&broadcast)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = parser.AddCommand("signandbroadcast",
+		"build and broadcast the transaction",
+		"Sign, build the transaction and broadcast.",
+		&signAndBroadcast)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -154,7 +165,7 @@ func (x *Sign) Execute(args []string) error {
 }
 
 type Broadcast struct {
-	BuyerSig  string `long:"buyersig" description:"The buyer's signature'"`
+	BuyerSig  string `long:"buyersig" description:"The buyer's signature'" default:"asdf"`
 	VendorSig string `long:"vendorsig" description:"The vendor's signature'"`
 }
 
@@ -231,6 +242,100 @@ func (x *Broadcast) Execute(args []string) error {
 	}
 	if resp.StatusCode == http.StatusOK {
 		fmt.Println("Success!")
+	} else {
+		fmt.Println("Broadcasting failed")
+	}
+
+	return nil
+}
+
+type SignAndBroadcast struct {
+	Mnemonic string `short:"m" long:"mnemonic" description:"The mnemonic seed for this node"`
+}
+
+func (x *SignAndBroadcast) Execute(args []string) error {
+	if x.Mnemonic == "" {
+		return errors.New("you must enter your mnemonic seed")
+	}
+	txid, err := chainhash.NewHashFromStr("f88d10f2db8279e0381e54d9e62a894871d9b0f9d29eaa1432ce3b174d2bca84")
+	if err != nil {
+		return err
+	}
+	payoutAddress := "35uUXJrQSmnwWZN8FKpyu1JWa4BoywZF65"
+	addr, err := bsutil.DecodeAddress(payoutAddress, &btccfg.MainNetParams)
+	if err != nil {
+		return err
+	}
+	script, err := bstxscript.PayToAddrScript(addr)
+	if err != nil {
+		return err
+	}
+	tx := &wire.MsgTx{
+		Version: 1,
+		TxIn: []*wire.TxIn{
+			{
+				PreviousOutPoint: *wire.NewOutPoint(txid, 13),
+			},
+		},
+		TxOut: []*wire.TxOut{
+			{
+				PkScript: script,
+				Value:    13085170, // less fee
+			},
+		},
+	}
+
+	redeemScript, err := hex.DecodeString("51210230fadb0ed0268b346a7a832867a8ca9ab354ae99065268876eb56e83f56ed81d2102b306216502593a337123ceac0e420d0be0f400d1c91aad450f205224bdbecd3052ae")
+	if err != nil {
+		return err
+	}
+
+	seed := bip39.NewSeed(x.Mnemonic, "")
+	mPrivKey, err := hdkeychain.NewMaster(seed, &btccfg.MainNetParams)
+	if err != nil {
+
+		return err
+	}
+
+	chaincode, err := hex.DecodeString("dca931eb6117aef0996b3d216fe4d866fc0bd74e7a599b110e30c004159d6255")
+	if err != nil {
+		return err
+	}
+	mECKey, err := mPrivKey.ECPrivKey()
+	if err != nil {
+		return err
+	}
+
+	hdkey, err := childKey(mECKey.Serialize(), chaincode, true)
+	if err != nil {
+		return err
+	}
+
+	priv, err := hdkey.ECPrivKey()
+	if err != nil {
+		return err
+	}
+
+	sig, err := bstxscript.RawTxInWitnessSignature(tx, bstxscript.NewTxSigHashes(tx), 0, 13111838, redeemScript, bstxscript.SigHashAll, priv)
+	if err != nil {
+		return err
+	}
+	tx.TxIn[0].Witness = append(tx.TxIn[0].Witness, sig)
+
+	var buf bytes.Buffer
+	if err := tx.BtcEncode(&buf, wire.ProtocolVersion, wire.WitnessEncoding); err != nil {
+		return err
+	}
+
+	fmt.Println("Raw Tx: ", hex.EncodeToString(buf.Bytes()))
+	fmt.Println("Txid: ", tx.TxHash().String())
+
+	resp, err := http.Get(fmt.Sprintf("https://btc.blockbook.api.openbazaar.org/api/sendtx/%s", hex.EncodeToString(buf.Bytes())))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusOK {
+		fmt.Println("Broadcast Success!")
 	} else {
 		fmt.Println("Broadcasting failed")
 	}
